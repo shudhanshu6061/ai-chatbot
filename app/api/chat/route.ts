@@ -41,36 +41,58 @@ export async function POST(request: Request) {
       request.headers.get("authorization") ||
       request.headers.get("Authorization");
 
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : null;
+
     let supabase = null;
+    let userId: string | null = null;
     let user = null;
 
-    if (authHeader?.startsWith("Bearer ")) {
-      const token = authHeader.slice(7);
-
-      supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
-        {
-          global: {
-            headers: {
-              Authorization: `Bearer ${token}`,
-            },
-          },
+    if (token) {
+      // Fast path: decode JWT payload to get user ID without remote network round-trip
+      try {
+        const parts = token.split(".");
+        if (parts.length >= 2) {
+          const payload = JSON.parse(
+            Buffer.from(parts[1], "base64url").toString("utf8")
+          );
+          if (payload?.sub) {
+            userId = payload.sub;
+          }
         }
-      );
+      } catch {
+        // Fallback if parsing fails
+      }
 
-      const {
-        data: { user: authenticatedUser },
-        error: userError,
-      } = await supabase.auth.getUser();
+      // If documentId is present, we need full Supabase client and verified user for RAG
+      if (documentId) {
+        supabase = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,
+          {
+            global: {
+              headers: {
+                Authorization: `Bearer ${token}`,
+              },
+            },
+          }
+        );
 
-      if (!userError && authenticatedUser) {
-        user = authenticatedUser;
+        const {
+          data: { user: authenticatedUser },
+          error: userError,
+        } = await supabase.auth.getUser();
+
+        if (!userError && authenticatedUser) {
+          user = authenticatedUser;
+          userId = authenticatedUser.id;
+        }
       }
     }
 
     // Rate limiting: 20 requests per minute per user/client
-    const clientId = getClientIdentifier(request, user?.id);
+    const clientId = getClientIdentifier(request, userId);
     const rateCheck = rateLimit(`chat:${clientId}`, 20, 60_000);
     if (!rateCheck.allowed) {
       return new Response(
@@ -234,6 +256,13 @@ ${currentDoc.content.slice(0, 5000)}`;
     const systemPrompt = context
       ? `You are a helpful, knowledgeable AI assistant.
 
+You were created and developed by Shudhanshu Prajapati, Founder & Full-Stack Developer.
+
+If the user asks who created you, who developed you, who your founder is, or who built you, answer clearly:
+"I was created and developed by Shudhanshu Prajapati, Founder & Full-Stack Developer."
+
+Do not claim Shudhanshu created the underlying AI model or third-party services.
+
 The user has attached the document "${documentName || "Uploaded Document"}". Relevant context from this document is provided below.
 
 GUIDELINES:
@@ -245,7 +274,14 @@ GUIDELINES:
 
 DOCUMENT CONTEXT:
 ${context}`
-      : "You are a helpful, knowledgeable AI assistant.";
+      : `You are a helpful, knowledgeable AI assistant.
+
+You were created and developed by Shudhanshu Prajapati, Founder & Full-Stack Developer.
+
+If the user asks who created you, who developed you, who your founder is, or who built you, answer clearly:
+"I was created and developed by Shudhanshu Prajapati, Founder & Full-Stack Developer."
+
+Do not claim Shudhanshu created the underlying AI model or third-party services.`;
 
     const apiMessages = [
       { role: "system", content: systemPrompt },
@@ -255,12 +291,12 @@ ${context}`
       })),
     ];
 
-    // Supported ExperientialLabs models in priority order, honoring EXPLABS_MODEL env var if configured
+    // Supported ExperientialLabs models in priority order (fastest TTFT first), honoring EXPLABS_MODEL env var if configured
     const defaultModels = [
-      "deepseek-v4.1-flash",
       "deepseek-v4-flash",
-      "gpt-5.6-luna",
       "qwen3.8-27b",
+      "gpt-5.6-luna",
+      "deepseek-v4.1-flash",
     ];
 
     const explabsModel = process.env.EXPLABS_MODEL?.trim();
@@ -377,7 +413,8 @@ ${context}`
     return new Response(readableStream, {
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
         Connection: "keep-alive",
       },
     });

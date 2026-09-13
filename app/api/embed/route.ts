@@ -189,38 +189,54 @@ export async function POST(request: Request) {
       apiKey: process.env.GEMINI_API_KEY,
     });
 
-    // Generate embeddings and save chunks
-    for (let i = 0; i < chunks.length; i++) {
-      const chunkContent = chunks[i];
+    // Generate embeddings with controlled concurrency (batches of 5)
+    const BATCH_SIZE = 5;
+    const recordsToInsert: Array<{
+      document_id: string;
+      user_id: string;
+      content: string;
+      embedding: number[];
+      chunk_index: number;
+    }> = [];
 
-      const result = await ai.models.embedContent({
-        model: "gemini-embedding-001",
-        contents: chunkContent,
-        config: {
-          outputDimensionality: 768,
-        },
-      });
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batch = chunks.slice(i, i + BATCH_SIZE);
+      const batchPromises = batch.map(async (chunkContent, offset) => {
+        const chunkIndex = i + offset;
+        const result = await ai.models.embedContent({
+          model: "gemini-embedding-001",
+          contents: chunkContent,
+          config: {
+            outputDimensionality: 768,
+          },
+        });
 
-      const embedding = result.embeddings?.[0]?.values;
+        const embedding = result.embeddings?.[0]?.values;
+        if (!embedding) {
+          throw new Error(`Failed to generate embedding for chunk ${chunkIndex}.`);
+        }
 
-      if (!embedding) {
-        throw new Error(`Failed to generate embedding for chunk ${i}.`);
-      }
-
-      const { error: insertError } = await supabase
-        .from("document_chunks")
-        .insert({
+        return {
           document_id: document.id,
           user_id: user.id,
           content: chunkContent,
           embedding,
-          chunk_index: i,
-        });
+          chunk_index: chunkIndex,
+        };
+      });
 
-      if (insertError) {
-        console.error("Chunk insert error:", insertError.message);
-        throw insertError;
-      }
+      const batchResults = await Promise.all(batchPromises);
+      recordsToInsert.push(...batchResults);
+    }
+
+    // Bulk insert all chunks into Supabase in a single operation
+    const { error: insertError } = await supabase
+      .from("document_chunks")
+      .insert(recordsToInsert);
+
+    if (insertError) {
+      console.error("Bulk chunk insert error:", insertError.message);
+      throw insertError;
     }
 
     return NextResponse.json({

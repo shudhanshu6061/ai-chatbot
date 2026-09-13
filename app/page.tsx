@@ -695,14 +695,6 @@ export default function Home() {
     let conversationMessages: Message[] = [];
 
     try {
-      if (!conversationId) {
-        conversationId = await createConversation(messageText);
-      }
-
-      if (attachedDocument) {
-        setConversationDoc(conversationId, attachedDocument);
-      }
-
       const userMessage: Message = {
         role: "user",
         content: messageText.trim(),
@@ -710,7 +702,7 @@ export default function Home() {
 
       conversationMessages = [...messages, userMessage];
 
-      // Add temporary empty assistant message
+      // Optimistically add user message and temporary empty assistant placeholder
       setMessages([
         ...conversationMessages,
         {
@@ -719,14 +711,35 @@ export default function Home() {
         },
       ]);
 
-      await saveMessage(conversationId, "user", messageText.trim());
-
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      // 1. Concurrently obtain auth session
+      const sessionPromise = supabase.auth.getSession();
+
+      // 2. Concurrently ensure conversation exists and save user message without blocking AI stream
+      const convIdPromise: Promise<string> = conversationId
+        ? Promise.resolve(conversationId)
+        : createConversation(messageText.trim());
+
+      const userSavePromise = convIdPromise
+        .then(async (id) => {
+          conversationId = id;
+          if (attachedDocument) {
+            setConversationDoc(id, attachedDocument);
+          }
+          await saveMessage(id, "user", messageText.trim());
+          return id;
+        })
+        .catch((err) => {
+          console.warn("Background user message save:", err);
+          return conversationId || "";
+        });
+
+      // 3. Immediately launch the AI streaming request (zero dead time waiting on DB)
       const {
         data: { session },
-      } = await supabase.auth.getSession();
+      } = await sessionPromise;
 
       const response = await fetch("/api/chat", {
         method: "POST",
@@ -764,21 +777,46 @@ export default function Home() {
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
 
+      // Batch rendering of fast streaming tokens with requestAnimationFrame for 60fps UI
+      let animationFrameId: number | null = null;
+      const renderChunk = (content: string) => {
+        if (animationFrameId !== null) return;
+        animationFrameId = requestAnimationFrame(() => {
+          setMessages([
+            ...conversationMessages,
+            {
+              role: "assistant",
+              content,
+            },
+          ]);
+          animationFrameId = null;
+        });
+      };
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
         assistantMessage += chunk;
-
-        setMessages([
-          ...conversationMessages,
-          {
-            role: "assistant",
-            content: assistantMessage,
-          },
-        ]);
+        renderChunk(assistantMessage);
       }
+
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
+
+      // Final synchronous render of full assistant message
+      setMessages([
+        ...conversationMessages,
+        {
+          role: "assistant",
+          content: assistantMessage,
+        },
+      ]);
+
+      // Ensure background user message save has completed
+      await userSavePromise;
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
         // User intentionally stopped generation
@@ -811,11 +849,12 @@ export default function Home() {
 
       // Handle persistence and state cleanup for assistant message
       const trimmedAssistant = assistantMessage.trim();
-      if (conversationId) {
+      const activeId = conversationId || currentConversationId;
+      if (activeId) {
         if (trimmedAssistant) {
           try {
             const saved = await saveMessage(
-              conversationId,
+              activeId,
               "assistant",
               trimmedAssistant
             );
@@ -827,7 +866,19 @@ export default function Home() {
                 content: trimmedAssistant,
               },
             ]);
-            await touchConversation(conversationId);
+            // Reorder local conversation list immediately
+            const updatedAt = new Date().toISOString();
+            setConversations((prev) =>
+              prev
+                .map((conv) =>
+                  conv.id === activeId ? { ...conv, updated_at: updatedAt } : conv
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(b.updated_at).getTime() -
+                    new Date(a.updated_at).getTime()
+                )
+            );
           } catch (saveErr) {
             console.error("Failed to save assistant message:", saveErr);
           }
