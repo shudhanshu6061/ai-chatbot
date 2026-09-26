@@ -342,11 +342,10 @@ export default function Home() {
           },
         });
 
-        if (!response.ok) {
-          throw new Error("Failed to load conversations");
-        }
-
-        const result = await response.json();
+        const result = await parseApiResponse(
+          response,
+          "Failed to load conversations"
+        );
         const list = result.conversations ?? (Array.isArray(result) ? result : []);
 
         if (!isMounted) return;
@@ -361,7 +360,10 @@ export default function Home() {
           });
 
           if (msgResponse.ok) {
-            const msgResult = await msgResponse.json();
+            const msgResult = await parseApiResponse(
+              msgResponse,
+              "Failed to load conversation messages"
+            );
             const data = msgResult.messages ?? (Array.isArray(msgResult) ? msgResult : []);
             if (isMounted) {
               setCurrentConversationId(firstId);
@@ -415,11 +417,10 @@ export default function Home() {
         },
       });
 
-      if (!response.ok) {
-        throw new Error("Failed to load conversation messages");
-      }
-
-      const result = await response.json();
+      const result = await parseApiResponse(
+        response,
+        "Failed to load conversation messages"
+      );
       const data = result.messages ?? (Array.isArray(result) ? result : []);
 
       setCurrentConversationId(id);

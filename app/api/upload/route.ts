@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
+import { extractText, getDocumentProxy } from "unpdf";
 import { createClient } from "@supabase/supabase-js";
 import { rateLimit, getClientIdentifier } from "@/app/lib/rate-limiter";
 
@@ -110,24 +110,13 @@ export async function POST(request: Request) {
       );
     }
 
-    // 5. Parse PDF
+    // 5. Parse PDF using unpdf (serverless-friendly, no native binaries)
     const arrayBuffer = await file.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    const pdf = await getDocumentProxy(new Uint8Array(arrayBuffer));
+    const { totalPages, text: extractedText } = await extractText(pdf, { mergePages: true });
 
-    const parser = new PDFParse({ data: buffer });
-    let text = "";
-    let pages = 1;
-    try {
-      const textResult = await parser.getText();
-      text = textResult.text?.trim();
-      pages = textResult.total || 1;
-    } finally {
-      try {
-        await parser.destroy();
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
+    const text = (extractedText || "").trim();
+    const pages = totalPages || 1;
 
     if (!text) {
       return NextResponse.json(
