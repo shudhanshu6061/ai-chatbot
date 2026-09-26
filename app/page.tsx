@@ -226,6 +226,59 @@ function getConversationGroup(dateString: string) {
   return "Older";
 }
 
+async function parseApiResponse<T = any>(
+  response: Response,
+  fallbackErrorMessage: string
+): Promise<T> {
+  const text = await response.text();
+  let json: any = null;
+
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // Body is not JSON (e.g. HTML error page or empty/truncated text)
+    }
+  }
+
+  if (!response.ok) {
+    const serverMessage =
+      json?.error ||
+      json?.message ||
+      (text && text.length < 200 && !text.includes("<html") && !text.includes("<!DOCTYPE")
+        ? text.trim()
+        : null);
+
+    if (serverMessage) {
+      throw new Error(serverMessage);
+    }
+
+    if (response.status === 413) {
+      throw new Error("PDF file is too large for the server to process (HTTP 413).");
+    }
+    if (response.status === 504) {
+      throw new Error("Server timed out processing the document (HTTP 504). Please try a smaller PDF.");
+    }
+    if (response.status === 502 || response.status === 503) {
+      throw new Error("Processing service is temporarily unavailable (HTTP 502/503).");
+    }
+    if (response.status === 401) {
+      throw new Error("Your session has expired. Please refresh the page.");
+    }
+    if (response.status === 429) {
+      throw new Error("Too many requests. Please wait a moment before trying again.");
+    }
+
+    throw new Error(`${fallbackErrorMessage} (HTTP ${response.status})`);
+  }
+
+  if (json === null) {
+    return {} as T;
+  }
+
+  return json as T;
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -411,11 +464,10 @@ export default function Home() {
       body: JSON.stringify({ title }),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to create conversation.");
-    }
+    const data = await parseApiResponse(
+      response,
+      "Failed to create conversation."
+    );
 
     const conversation = data.conversation || data;
 
@@ -455,11 +507,10 @@ export default function Home() {
       }),
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to save message.");
-    }
+    const data = await parseApiResponse(
+      response,
+      "Failed to save message."
+    );
 
     return data.message || data;
   }
@@ -559,10 +610,10 @@ export default function Home() {
         body: formData,
       });
 
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to upload and parse PDF.");
-      }
+      const result = await parseApiResponse<{ filename: string; text: string; pages: number }>(
+        response,
+        "Failed to upload and parse PDF."
+      );
 
       // Step 2: Store document record
       setUploadProgress("Processing document...");
@@ -579,10 +630,10 @@ export default function Home() {
         }),
       });
 
-      const document = await docResponse.json();
-      if (!docResponse.ok) {
-        throw new Error(document.error || "Document creation failed.");
-      }
+      const document = await parseApiResponse<{ id: string; filename: string }>(
+        docResponse,
+        "Document creation failed."
+      );
 
       // Step 3: Embed document chunks
       setUploadProgress("Creating searchable index...");
@@ -597,10 +648,10 @@ export default function Home() {
         }),
       });
 
-      const embedResult = await embedResponse.json();
-      if (!embedResponse.ok) {
-        throw new Error(embedResult.error || "Failed to create searchable index.");
-      }
+      const embedResult = await parseApiResponse<{ chunks: number; success: boolean }>(
+        embedResponse,
+        "Failed to create searchable index."
+      );
 
       // Step 4: Attach to conversation
       let convId = currentConversationId;
@@ -616,7 +667,7 @@ export default function Home() {
 
       setUploadProgress("PDF ready ✓");
       setUploadMessage(
-        `✓ ${result.filename} attached (${embedResult.chunks} indexed sections)`
+        `✓ ${result.filename} attached (${embedResult.chunks || 0} indexed sections)`
       );
     } catch (error) {
       console.warn("Upload failed:", error instanceof Error ? error.message : "Unknown error");
@@ -656,10 +707,7 @@ export default function Home() {
         },
       });
 
-      const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.error || "Failed to delete document.");
-      }
+      await parseApiResponse(response, "Failed to delete document.");
 
       setAttachedDocument(null);
       if (currentConversationId) {

@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { rateLimit, getClientIdentifier } from "@/app/lib/rate-limiter";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 function chunkText(
   text: string,

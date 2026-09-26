@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
@@ -88,7 +89,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("Documents POST error:", error instanceof Error ? error.message : "Unknown error");
     return NextResponse.json(
-      { error: "Internal server error." },
+      { error: error instanceof Error ? error.message : "Failed to create document." },
       { status: 500 }
     );
   }

@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { rateLimit, getClientIdentifier } from "@/app/lib/rate-limiter";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
 
@@ -146,7 +147,7 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error("PDF upload error:", error instanceof Error ? error.message : "Unknown error");
     return NextResponse.json(
-      { error: "Failed to process PDF." },
+      { error: error instanceof Error ? error.message : "Failed to process PDF." },
       { status: 500 }
     );
   }
